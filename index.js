@@ -3,50 +3,74 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
-app.use(cors());
-app.use(express.json());
-
+// Configuración para Railway
 const PORT = process.env.PORT || 3000;
 
-// GET endpoint - test
+// Middleware
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+
+// Health check - Railway necesita esto
+app.get('/', (req, res) => {
+  res.json({ 
+    message: '🎯 Outfit API Railway',
+    status: 'running',
+    platform: 'railway',
+    endpoints: {
+      test: 'GET /api/claude',
+      generate: 'POST /api/claude'
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+// GET endpoint - test conectividad
 app.get('/api/claude', (req, res) => {
   res.json({
     message: '✅ API Railway funcionando perfectamente',
     timestamp: new Date().toISOString(),
     status: 'ok',
-    platform: 'railway'
+    platform: 'railway',
+    port: PORT
   });
 });
 
 // POST endpoint - generar outfit
 app.post('/api/claude', async (req, res) => {
   try {
+    console.log('🚀 Iniciando generación de outfit...');
+    
     const { wardrobe, weather, occasion, dayName } = req.body;
 
     // Validaciones
-    if (!wardrobe || wardrobe.length < 3) {
+    if (!wardrobe || !Array.isArray(wardrobe) || wardrobe.length < 3) {
       return res.status(400).json({ 
         error: 'Se requieren al menos 3 prendas',
-        received: wardrobe?.length || 0
+        received: wardrobe?.length || 0,
+        timestamp: new Date().toISOString()
       });
     }
 
     // API Key
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
+      console.error('❌ API key no encontrada');
       return res.status(500).json({ 
         error: 'API key no configurada',
-        hint: 'Configura ANTHROPIC_API_KEY en variables de entorno'
+        hint: 'Configura ANTHROPIC_API_KEY en variables de entorno de Railway',
+        timestamp: new Date().toISOString()
       });
     }
 
-    console.log('🚀 Generando outfit...');
+    console.log('✅ API key encontrada, generando prompt...');
 
-    // Prompt para Claude
+    // Prompt optimizado para Claude
     const prompt = `Eres un estilista profesional. Selecciona 3 prendas para un outfit ${occasion} para ${dayName || 'hoy'}.
 
 PRENDAS DISPONIBLES:
 ${wardrobe.slice(0, 8).map(item => `${item.id}: ${item.tipo} - ${item.nombre} (${item.color})`).join('\n')}
+
+CLIMA: ${weather?.temp || 22}°C, ${weather?.description || 'agradable'}
 
 Responde SOLO este JSON sin texto adicional:
 {
@@ -59,7 +83,12 @@ Responde SOLO este JSON sin texto adicional:
   "tips": ["consejo 1", "consejo 2"]
 }`;
 
-    // Llamada a Claude API
+    console.log('🤖 Llamando a Claude API...');
+
+    // Llamada a Claude API con timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -72,16 +101,20 @@ Responde SOLO este JSON sin texto adicional:
         max_tokens: 400,
         temperature: 0.7,
         messages: [{ role: "user", content: prompt }]
-      })
+      }),
+      signal: controller.signal
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('❌ Claude API error:', errorText);
+      console.error('❌ Claude API error:', response.status, errorText);
       return res.status(500).json({
         error: 'Error en Claude API',
         status: response.status,
-        details: errorText.substring(0, 200)
+        details: errorText.substring(0, 200),
+        timestamp: new Date().toISOString()
       });
     }
 
@@ -89,10 +122,16 @@ Responde SOLO este JSON sin texto adicional:
     const outfitText = data.content?.[0]?.text;
 
     if (!outfitText) {
-      return res.status(500).json({ error: 'Respuesta vacía de Claude' });
+      console.error('❌ Respuesta vacía de Claude');
+      return res.status(500).json({ 
+        error: 'Respuesta vacía de Claude',
+        timestamp: new Date().toISOString()
+      });
     }
 
-    // Parse JSON
+    console.log('✅ Claude respondió, parseando JSON...');
+
+    // Limpiar y parsear JSON
     let cleanedText = outfitText.trim();
     cleanedText = cleanedText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
     
@@ -105,7 +144,9 @@ Responde SOLO este JSON sin texto adicional:
     let outfitData;
     try {
       outfitData = JSON.parse(cleanedText);
+      console.log('✅ JSON parseado correctamente');
     } catch (parseError) {
+      console.log('⚠️ JSON parse failed, usando fallback automático...');
       // Fallback automático
       const tops = wardrobe.filter(item => item.tipo === 'top');
       const bottoms = wardrobe.filter(item => item.tipo === 'bottom');
@@ -115,10 +156,10 @@ Responde SOLO este JSON sin texto adicional:
         outfit: {
           top: { id: tops[0]?.id || wardrobe[0]?.id, razon: `Perfecto para ${occasion}` },
           bottom: { id: bottoms[0]?.id || wardrobe[1]?.id, razon: "Combina perfectamente" },
-          shoes: { id: shoes[0]?.id || wardrobe[2]?.id, razon: "Completa el look" }
+          shoes: { id: shoes[0]?.id || wardrobe[2]?.id, razon: "Completa el look ideal" }
         },
         descripcion: `Look ${occasion} perfecto para ${dayName || 'hoy'}`,
-        tips: ["Outfit generado automáticamente", "Colores coordinados"]
+        tips: ["Outfit generado automáticamente", "Colores perfectamente coordinados"]
       };
     }
 
@@ -134,14 +175,23 @@ Responde SOLO este JSON sin texto adicional:
       generatedAt: new Date().toISOString(),
       day: dayName,
       weather: weather,
-      source: 'railway-express'
+      source: 'railway-express',
+      port: PORT
     };
 
-    console.log('✅ Outfit generado exitosamente');
+    console.log('🎯 Outfit generado exitosamente');
     res.json(result);
 
   } catch (error) {
-    console.error('💥 Error:', error);
+    console.error('💥 Error general:', error);
+    
+    if (error.name === 'AbortError') {
+      return res.status(408).json({
+        error: 'Timeout: Claude API tardó más de 25 segundos',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
     res.status(500).json({
       error: 'Error interno del servidor',
       message: error.message,
@@ -150,17 +200,20 @@ Responde SOLO este JSON sin texto adicional:
   }
 });
 
-// Health check
-app.get('/', (req, res) => {
-  res.json({ 
-    message: 'Outfit API Railway',
-    status: 'running',
-    endpoints: ['/api/claude']
-  });
+// Iniciar servidor
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Outfit API corriendo en puerto ${PORT}`);
+  console.log(`🌍 Health check: http://localhost:${PORT}/`);
+  console.log(`🎯 API endpoint: http://localhost:${PORT}/api/claude`);
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+// Manejo de errores no capturados
+process.on('uncaughtException', (error) => {
+  console.error('💥 Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 module.exports = app;
